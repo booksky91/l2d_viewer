@@ -1,4 +1,4 @@
-# Live2D GUI Viewer v2.0 (Native MVP)
+# Live2D GUI Viewer (Native MVP)
 
 C++ / OpenGL / Dear ImGui 기반의 **Live2D 다중 모델 실시간 배치 뷰어 및 투명 비디오/이미지 시퀀스 고품질 내보내기(Export) 도구**입니다.  
 Cubism Editor 결제 없이도 Native SDK 런타임의 그래픽 콘텍스트를 오프스크린 FBO(Frame Buffer Object)로 가로채고, FFmpeg 파이프라인과 연동하여 **알파 투명 채널이 보존된 WebM(VP9) 영상 및 디더링 최적화된 GIF** 등을 초고화질로 인코딩하여 추출합니다.
