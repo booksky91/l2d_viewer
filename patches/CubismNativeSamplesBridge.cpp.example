@@ -1,0 +1,162 @@
+// This is an adapter example, not a drop-in compiled file.
+// Copy it into a project that already builds Live2D/CubismNativeSamples OpenGL Demo,
+// then adjust include paths and renderer calls for your SDK version.
+//
+// Goal: implement l2dgui::INativeCubismBridge without the GUI including Live2D headers.
+
+#include "backends/CubismNativeBackend.hpp"
+
+#if defined(L2D_ENABLE_CUBISM_NATIVE)
+
+#include "LAppModel.hpp"
+#include "LAppPal.hpp"
+#include "LAppDefine.hpp"
+#include "LAppTextureManager.hpp"
+#include "LAppDelegate.hpp" // optional: depends on how your sample initializes framework/texture manager
+#include "Math/CubismMatrix44.hpp"
+#include <memory>
+#include <unordered_map>
+
+namespace l2dgui
+{
+namespace
+{
+constexpr int PriorityForce = 3; // match LAppDefine::PriorityForce in the sample if available
+
+struct NativeModelRuntime
+{
+    std::unique_ptr<LAppModel> model;
+    float x = 0.0f;
+    float y = 0.0f;
+    float scale = 1.0f;
+    float rotationDeg = 0.0f;
+    float alpha = 1.0f;
+    std::string currentGroup;
+    int currentIndex = -1;
+    bool loop = true;
+};
+}
+
+class CubismNativeSamplesBridge final : public INativeCubismBridge
+{
+public:
+    bool initialize(std::string* error) override
+    {
+        // If you start from the official OpenGL Demo, framework initialization already
+        // happens in LAppDelegate. For a standalone app, move the CubismFramework::StartUp/
+        // Initialize calls from LAppDelegate here.
+        (void)error;
+        return true;
+    }
+
+    void shutdown() override
+    {
+        _models.clear();
+        // If this bridge owns CubismFramework startup, dispose it here.
+    }
+
+    bool load(uint64_t id, const std::string& modelDirUtf8, const std::string& model3FileUtf8, std::string* error) override
+    {
+        auto rt = std::make_unique<NativeModelRuntime>();
+        rt->model = std::make_unique<LAppModel>();
+        rt->model->LoadAssets(modelDirUtf8.c_str(), model3FileUtf8.c_str());
+        if (!rt->model)
+        {
+            if (error) *error = "LAppModel::LoadAssets failed.";
+            return false;
+        }
+        _models[id] = std::move(rt);
+        return true;
+    }
+
+    void unload(uint64_t id) override
+    {
+        _models.erase(id);
+    }
+
+    void startMotion(uint64_t id, const std::string& group, int index, bool loop) override
+    {
+        auto* rt = find(id);
+        if (!rt) return;
+        rt->currentGroup = group;
+        rt->currentIndex = index;
+        rt->loop = loop;
+        rt->model->StartMotion(group.c_str(), index, PriorityForce);
+        // Native sample's CubismMotion loop flag is not exposed by LAppModel.
+        // For true loop export, restart motion when finished or patch LAppModel to expose ACubismMotion::SetLoop.
+    }
+
+    void stopMotion(uint64_t id) override
+    {
+        auto* rt = find(id);
+        if (!rt) return;
+        // The sample does not expose StopAllMotions publicly by default.
+        // Add LAppModel::StopAllMotions() { _motionManager->StopAllMotions(); } and call it here.
+    }
+
+    void setExpression(uint64_t id, const std::string& name) override
+    {
+        auto* rt = find(id);
+        if (rt) rt->model->SetExpression(name.c_str());
+    }
+
+    void setTransform(uint64_t id, float x, float y, float scale, float rotationDeg, float alpha) override
+    {
+        auto* rt = find(id);
+        if (!rt) return;
+        rt->x = x;
+        rt->y = y;
+        rt->scale = scale;
+        rt->rotationDeg = rotationDeg;
+        rt->alpha = alpha;
+        // Add a public opacity setter in LAppModel if you want alpha to affect actual Cubism draw opacity.
+    }
+
+    void update(uint64_t id, float) override
+    {
+        auto* rt = find(id);
+        if (rt) rt->model->Update();
+    }
+
+    void draw(uint64_t id, int width, int height, float panX, float panY, float zoom) override
+    {
+        auto* rt = find(id);
+        if (!rt) return;
+        Live2D::Cubism::Framework::CubismMatrix44 matrix;
+        const float aspect = height > 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+        matrix.Scale(zoom / aspect * rt->scale, zoom * rt->scale);
+        matrix.Translate(rt->x + panX, rt->y + panY);
+        // Add rotation here by multiplying a rotation matrix if desired.
+        rt->model->Draw(matrix);
+    }
+
+    void drawAtTime(uint64_t id, int width, int height, float absoluteTimeSeconds) override
+    {
+        auto* rt = find(id);
+        if (!rt) return;
+        // The official LAppPal::GetDeltaTime path is real-time based.
+        // For deterministic export, patch LAppPal to accept forced delta:
+        //   LAppPal::SetFixedDeltaTime(1.0f / fps)
+        // or expose LAppModel::UpdateWithDelta(float dt).
+        (void)absoluteTimeSeconds;
+        update(id, 0.0f);
+        draw(id, width, height, 0.0f, 0.0f, 1.0f);
+    }
+
+private:
+    NativeModelRuntime* find(uint64_t id)
+    {
+        auto it = _models.find(id);
+        return it == _models.end() ? nullptr : it->second.get();
+    }
+
+    std::unordered_map<uint64_t, std::unique_ptr<NativeModelRuntime>> _models;
+};
+
+std::unique_ptr<INativeCubismBridge> createNativeCubismBridge()
+{
+    return std::make_unique<CubismNativeSamplesBridge>();
+}
+
+} // namespace l2dgui
+#endif
