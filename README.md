@@ -124,4 +124,4 @@ cmake -S . -B build-native `
   - GLFW (zlib/libpng License)
   - GLEW (Modified BSD/MIT License)
   - FFmpeg (LGPL/GPL License)
-  - 본 프로그램의 배포 및 활용 시에는 위 오픈소스 라이선스 및 가공하여 처리하는 Live2D 모델 에셋의 개별 라이선스 약관을 반드시 준수하여야 합니다. 상세한 내용은 [LICENSE_NOTES.md](file:///d:/workspace/dev/live2d_native_gui_viewer_mvp/LICENSE_NOTES.md)를 참고해 주십시오.
+  - 본 프로그램의 배포 및 활용 시에는 위 오픈소스 라이선스 및 가공하여 처리하는 Live2D 모델 에셋의 개별 라이선스 약관을 반드시 준수하여야 합니다.
