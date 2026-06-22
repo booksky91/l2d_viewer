@@ -116,7 +116,7 @@ cmake -S . -B build-native `
   - 본 프로그램의 소스 코드는 **GNU General Public License v3.0 (GPL-3.0)** 라이선스 하에 배포되는 오픈소스 소프트웨어입니다.
   - 사용자는 자유롭게 코드를 활용, 수정, 재배포 및 상업적 사용을 할 수 있지만, 이 코드를 활용하여 제작된 2차 저작물 또한 동일한 GPL v3 라이선스로 투명하게 소스 코드를 공개해야 합니다. 상세 조항은 [LICENSE](file:///d:/workspace/dev/live2d_native_gui_viewer_mvp/LICENSE) 파일을 참고해 주십시오.
 - **Live2D Cubism SDK & Core**:
-  - Live2D Cubism SDK 및 Cubism Core의 저작권은 **(주)Live2D (Live2D Inc.)**에 있습니다.
+  - Live2D Cubism SDK 및 Cubism Core의 저작권은 (주)Live2D (Live2D Inc.)에 있습니다.
   - 본 프로그램 소스 코드 저장소에는 저작권 및 라이선스 약관에 따라 **Live2D Cubism Core 라이브러리 및 SDK 프레임워크 소스 코드가 포함되어 있지 않습니다.**
   - 실제 렌더링을 연동하여 빌드하거나 상업적 배포를 하려면 반드시 Live2D 공식 웹사이트의 [Live2D Proprietary Software License Agreement](https://www.live2d.com/eula/)에 동의하고 Cubism SDK를 별도로 다운로드하여 연동해야 합니다.
 - **기타 오픈소스**:
