@@ -7,6 +7,10 @@
 #include <iostream>
 #include <algorithm>
 
+namespace Live2D { namespace Cubism { namespace Framework {
+extern int g_steppedInterpolationMode;
+}}}
+
 namespace l2dgui
 {
 
@@ -292,6 +296,9 @@ void CubismNativeBackend::update(AppState& state, float dtSeconds)
     if (!_bridge) return;
     for (const auto& m : state.models)
     {
+#if defined(L2D_ENABLE_CUBISM_NATIVE)
+        Live2D::Cubism::Framework::g_steppedInterpolationMode = m.steppedInterpolationMode;
+#endif
         _bridge->setTransform(m.id, m.x, m.y, m.scale, m.rotationDeg, m.alpha, m.flipX, m.flipY, m.loopMotion);
         _bridge->setMotionBlendThreshold(m.id, m.motionBlendDeltaThreshold);
         _bridge->update(m.id, dtSeconds * m.timeScale, m.autoIdle);
@@ -325,11 +332,21 @@ void CubismNativeBackend::drawForExport(const AppState& state, int width, int he
     {
         if (!m.visible) continue;
         if (state.exportSettings.selectedOnly && !m.selected) continue;
+#if defined(L2D_ENABLE_CUBISM_NATIVE)
+        Live2D::Cubism::Framework::g_steppedInterpolationMode = m.steppedInterpolationMode;
+#endif
         _bridge->setTransform(m.id, m.x, m.y, m.scale, m.rotationDeg, m.alpha, m.flipX, m.flipY, m.loopMotion);
         _bridge->drawAtTime(m.id, width, height, absoluteTimeSeconds,
                             camera.panX, camera.panY, camera.zoom,
                             state.view.rotationDeg, state.view.flipX, state.view.flipY);
     }
+}
+
+extern "C" void LAppPal_SetExporting(bool exporting);
+
+void CubismNativeBackend::setExporting(bool exporting)
+{
+    LAppPal_SetExporting(exporting);
 }
 
 extern "C" bool g_hideRedOption;

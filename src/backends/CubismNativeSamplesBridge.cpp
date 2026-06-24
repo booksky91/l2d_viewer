@@ -29,6 +29,7 @@ extern "C" bool g_hideRedOption = false;
 #include <string>
 #include <unordered_map>
 #include <iostream>
+#include <fstream>
 #include <algorithm>
 
 #if defined(_WIN32)
@@ -41,12 +42,15 @@ extern "C" bool g_hideRedOption = false;
 extern "C" {
 void LAppPal_SetOverrideTime(double currentTime, double deltaTime);
 void LAppPal_ClearOverrideTime();
+bool LAppPal_IsOverridden();
+bool LAppPal_IsExporting();
 }
 
 namespace l2dgui
 {
 namespace
 {
+static bool g_insideDrawAtTime = false;
 
 class DummyMotion : public Live2D::Cubism::Framework::ACubismMotion
 {
@@ -73,6 +77,25 @@ protected:
         Live2D::Cubism::Framework::csmFloat32 weight,
         Live2D::Cubism::Framework::CubismMotionQueueEntry* motionQueueEntry) override
     {
+    }
+};
+
+class CubismQueueManagerAccessor : public Live2D::Cubism::Framework::CubismMotionManager
+{
+public:
+    Live2D::Cubism::Framework::csmBool DoUpdateMotionPublic(Live2D::Cubism::Framework::CubismModel* model, Live2D::Cubism::Framework::csmFloat32 t)
+    {
+        return DoUpdateMotion(model, t);
+    }
+
+    Live2D::Cubism::Framework::csmFloat32 GetUserTimeSeconds() const
+    {
+        return _userTimeSeconds;
+    }
+
+    void SetUserTimeSeconds(Live2D::Cubism::Framework::csmFloat32 t)
+    {
+        _userTimeSeconds = t;
     }
 };
 
@@ -141,6 +164,15 @@ public:
         }
     }
 
+    void ResetUserTimeSeconds()
+    {
+        _userTimeSeconds = 0.0f;
+        if (_motionManager)
+        {
+            static_cast<CubismQueueManagerAccessor*>(_motionManager)->SetUserTimeSeconds(0.0f);
+        }
+    }
+
     Live2D::Cubism::Framework::ACubismMotion* LoadMotion(
         const Live2D::Cubism::Framework::csmByte* buffer,
         Live2D::Cubism::Framework::csmSizeInt size,
@@ -167,15 +199,6 @@ public:
 private:
     Live2D::Cubism::Framework::ACubismMotion* _dummyMotion;
     bool _autoIdleEnabled;
-};
-
-class CubismQueueManagerAccessor : public Live2D::Cubism::Framework::CubismMotionQueueManager
-{
-public:
-    Live2D::Cubism::Framework::csmBool DoUpdateMotionPublic(Live2D::Cubism::Framework::CubismModel* model, Live2D::Cubism::Framework::csmFloat32 t)
-    {
-        return DoUpdateMotion(model, t);
-    }
 };
 
 static std::vector<float> sampleMotionFirstFrame(
@@ -839,6 +862,12 @@ public:
         auto* rt = find(id);
         if (!rt || rt->nativeCrashed) return;
 
+        // 내보내기 진행 중인데 drawAtTime 외부에서 예기치 않게 호출되는 비동기 업데이트 연산은 완전히 스킵합니다.
+        if (LAppPal_IsExporting() && !g_insideDrawAtTime)
+        {
+            return;
+        }
+
         bool effectiveAutoIdle = autoIdle;
         if (rt->isPlaylistActive)
         {
@@ -1026,8 +1055,15 @@ public:
                                 double slotExpectStart = rt->playlistSlotStartTimes[rt->playlistCurrentIndex];
                                 double expectMotionStart = slotExpectStart + rt->poseBlendDuration;
                                 double actualStartOffset = rt->cumulativeTime - expectMotionStart;
-                                entry->SetStartTime(rt->cumulativeTime - actualStartOffset);
-                                entry->SetFadeInStartTime(rt->cumulativeTime - actualStartOffset);
+                                float userTime = static_cast<CubismQueueManagerAccessor*>(mqm2)->GetUserTimeSeconds();
+                                entry->SetStartTime(userTime - actualStartOffset);
+                                entry->SetFadeInStartTime(userTime - actualStartOffset);
+                                if (entry->GetEndTime() > 0.0f)
+                                {
+                                    float dur = entry->GetCubismMotion()->GetDuration();
+                                    if (dur < 0.0f) dur = entry->GetCubismMotion()->GetLoopDuration();
+                                    entry->SetEndTime(userTime - actualStartOffset + dur);
+                                }
                             }
                         }
                     }
@@ -1064,23 +1100,33 @@ public:
                 }
 
                 // SDK Update 건너뜀 (파라미터 덮어쓰기 방지) -> 수정: 덮어쓰는 모션이 없으므로 Update를 수행해 렌더링 동기화
-                LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
-                LAppPal::UpdateTime();
+                bool needOverride = !LAppPal_IsOverridden();
+                if (needOverride)
+                {
+                    LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
+                    LAppPal::UpdateTime();
+                }
                 setCrashStage("native update (blending): LAppModel::Update");
 #if defined(_WIN32)
                 safeUpdateModel(rt->model.get());
 #else
                 rt->model->Update();
 #endif
-                LAppPal_ClearOverrideTime();
+                if (needOverride)
+                {
+                    LAppPal_ClearOverrideTime();
+                }
                 return;
             }
         }
         // ────────────────────────────────────────────────
 
-        LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
-
-        LAppPal::UpdateTime();
+        bool needOverride = !LAppPal_IsOverridden();
+        if (needOverride)
+        {
+            LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
+            LAppPal::UpdateTime();
+        }
         setCrashStage("native update: LAppModel::Update");
 #if defined(_WIN32)
         if (!safeUpdateModel(rt->model.get()))
@@ -1088,14 +1134,20 @@ public:
             rt->nativeCrashed = true;
             rt->lastNativeError = lastSehMessage("LAppModel::Update");
             logDiagnostic(rt->lastNativeError);
-            LAppPal_ClearOverrideTime();
+            if (needOverride)
+            {
+                LAppPal_ClearOverrideTime();
+            }
             return;
         }
 #else
         rt->model->Update();
 #endif
 
-        LAppPal_ClearOverrideTime();
+        if (needOverride)
+        {
+            LAppPal_ClearOverrideTime();
+        }
     }
 
     void draw(uint64_t id, int width, int height, float panX, float panY, float zoom, float viewRotDeg, bool viewFlipX, bool viewFlipY, bool showWireframe, bool showHitAreas) override
@@ -1253,10 +1305,18 @@ public:
 
         rt->isFirstExportFrame = true;
         rt->lastExportTime = 0.0;
+        rt->cumulativeTime = 0.0;
+        if (rt->model)
+        {
+            rt->model->ResetUserTimeSeconds();
+        }
         if (rt->isPlaylistActive)
         {
-            rt->cumulativeTime = 0.0;
             playPlaylistSlot(rt, 0);
+        }
+        else
+        {
+            setMotionTime(id, 0.0f);
         }
     }
 
@@ -1278,9 +1338,26 @@ public:
             rt->lastExportTime = absoluteTimeSeconds;
         }
 
+        // 내보내기 중에는 일시정지 상태를 우회하여 강제로 시간이 흐르게 처리
+        bool wasPaused = rt->motionPaused;
+        rt->motionPaused = false;
+
+        g_insideDrawAtTime = true;
+
+        // drawAtTime 전체(update + draw)를 감싸도록 전역 오버라이드 락 지정.
+        // 타겟 프레임 시간(rt->cumulativeTime + dt)을 사전에 공급하며, 누적 자체는 하위 update() 내부에서 안전하게 1회 진행됩니다.
+        LAppPal_SetOverrideTime(rt->cumulativeTime + dt, dt);
+        LAppPal::UpdateTime();
+
         update(id, static_cast<float>(dt), false);
 
         draw(id, width, height, panX, panY, zoom, viewRotDeg, viewFlipX, viewFlipY, false, false);
+
+        LAppPal_ClearOverrideTime();
+
+        g_insideDrawAtTime = false;
+
+        rt->motionPaused = wasPaused;
     }
 
     float getMotionTime(uint64_t id) override
@@ -1366,8 +1443,15 @@ public:
                     {
                         double slotExpectStart = rt->playlistSlotStartTimes[targetSlot];
                         double actualStartOffset = timeSeconds - slotExpectStart;
-                        entry->SetStartTime(rt->cumulativeTime - actualStartOffset);
-                        entry->SetFadeInStartTime(rt->cumulativeTime - actualStartOffset);
+                        float userTime = static_cast<CubismQueueManagerAccessor*>(mqm)->GetUserTimeSeconds();
+                        entry->SetStartTime(userTime - actualStartOffset);
+                        entry->SetFadeInStartTime(userTime - actualStartOffset);
+                        if (entry->GetEndTime() > 0.0f)
+                        {
+                            float dur = entry->GetCubismMotion()->GetDuration();
+                            if (dur < 0.0f) dur = entry->GetCubismMotion()->GetLoopDuration();
+                            entry->SetEndTime(userTime - actualStartOffset + dur);
+                        }
                     }
                 }
             }
@@ -1390,11 +1474,15 @@ public:
                         {
                             if (entry->GetCubismMotion() != rt->model->GetDummyMotion())
                             {
-                                float localTime = static_cast<float>(rt->cumulativeTime) - entry->GetStartTime();
-                                float delta = timeSeconds - localTime;
-                                entry->SetStartTime(entry->GetStartTime() - delta);
-                                entry->SetFadeInStartTime(entry->GetFadeInStartTime() - delta);
-                                entry->SetEndTime(entry->GetEndTime() - delta);
+                                float userTime = static_cast<CubismQueueManagerAccessor*>(mqm)->GetUserTimeSeconds();
+                                entry->SetStartTime(userTime - timeSeconds);
+                                entry->SetFadeInStartTime(userTime - timeSeconds);
+                                if (entry->GetEndTime() > 0.0f)
+                                {
+                                    float dur = entry->GetCubismMotion()->GetDuration();
+                                    if (dur < 0.0f) dur = entry->GetCubismMotion()->GetLoopDuration();
+                                    entry->SetEndTime(userTime - timeSeconds + dur);
+                                }
                                 rt->lastCustomMotionTime = timeSeconds;
                                 found = true;
                                 break;
@@ -1415,11 +1503,15 @@ public:
                             {
                                 if (entry->GetCubismMotion() != rt->model->GetDummyMotion())
                                 {
-                                    float localTime = static_cast<float>(rt->cumulativeTime) - entry->GetStartTime();
-                                    float delta = timeSeconds - localTime;
-                                    entry->SetStartTime(entry->GetStartTime() - delta);
-                                    entry->SetFadeInStartTime(entry->GetFadeInStartTime() - delta);
-                                    entry->SetEndTime(entry->GetEndTime() - delta);
+                                    float userTime = static_cast<CubismQueueManagerAccessor*>(mqm)->GetUserTimeSeconds();
+                                    entry->SetStartTime(userTime - timeSeconds);
+                                    entry->SetFadeInStartTime(userTime - timeSeconds);
+                                    if (entry->GetEndTime() > 0.0f)
+                                    {
+                                        float dur = entry->GetCubismMotion()->GetDuration();
+                                        if (dur < 0.0f) dur = entry->GetCubismMotion()->GetLoopDuration();
+                                        entry->SetEndTime(userTime - timeSeconds + dur);
+                                    }
                                     rt->lastCustomMotionTime = timeSeconds;
                                     break;
                                 }

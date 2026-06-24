@@ -167,6 +167,7 @@ static json serializeModel(const ModelEntry& m)
     j["currentMotion"] = m.currentMotion;
     j["currentExpression"] = m.currentExpression;
     j["playlistActive"] = m.playlistActive;
+    j["steppedInterpolationMode"] = m.steppedInterpolationMode;
 
     json playlist = json::array();
     for (const auto& p : m.playlist)
@@ -271,6 +272,7 @@ bool ProjectSerializer::load(AppState& state, ILive2DBackend& backend, const std
                 get("flipY", entry.flipY);
                 get("currentMotion", entry.currentMotion);
                 get("currentExpression", entry.currentExpression);
+                get("steppedInterpolationMode", entry.steppedInterpolationMode);
                 get("playlistActive", entry.playlistActive);
 
                 if (mj.contains("playlist") && mj["playlist"].is_array())

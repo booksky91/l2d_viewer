@@ -50,6 +50,7 @@ public:
     // Used by FrameExporter. The OpenGL context is current on the same thread.
     // Passing the camera lets the exporter replicate the exact same viewport transform.
     virtual void prepareForExport(uint64_t modelId) = 0;
+    virtual void setExporting(bool exporting) = 0;
     virtual void drawForExport(const AppState& state, int width, int height, const ViewportCamera& camera, float absoluteTimeSeconds) = 0;
 
     virtual void setHideRedOption(bool enable) = 0;

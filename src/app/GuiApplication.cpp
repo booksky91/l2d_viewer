@@ -18,6 +18,15 @@
 #include <stdexcept>
 #include <thread>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
+#endif
+
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
@@ -44,6 +53,9 @@ GuiApplication::GuiApplication() = default;
 
 GuiApplication::~GuiApplication()
 {
+#if defined(_WIN32)
+    timeEndPeriod(1);
+#endif
     if (_backend) _backend->shutdown();
     if (_initialized)
     {
@@ -167,6 +179,9 @@ bool GuiApplication::initialize(int argc, char** argv)
     }
 
     _lastTime = glfwGetTime();
+#if defined(_WIN32)
+    timeBeginPeriod(1);
+#endif
     pushUndoState("Initial State");
     return true;
 }
@@ -377,7 +392,12 @@ int GuiApplication::run()
             double sleepTime = targetFrameTime - elapsed;
             if (sleepTime > 0.002)
             {
-                std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime - 0.001));
+                std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime - 0.0015));
+            }
+            // 정밀 튜닝용 바쁜 대기
+            while (glfwGetTime() - frameStartTime < targetFrameTime)
+            {
+                std::this_thread::yield();
             }
         }
     }
@@ -665,8 +685,13 @@ void GuiApplication::requestExport()
 
 void GuiApplication::executeExport()
 {
+    _backend->setExporting(true);
     auto selectedModels = _state.selectedModels();
-    if (selectedModels.empty()) return;
+    if (selectedModels.empty())
+    {
+        _backend->setExporting(false);
+        return;
+    }
 
     std::string timestamp = getCurrentTimestampString();
     ExportSettings settings = _state.exportSettings;
@@ -1041,6 +1066,7 @@ void GuiApplication::executeExport()
     ImGui::SetCurrentContext(mainCtx);
     ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
     ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoKeyboard;
+    _backend->setExporting(false);
 }
 
 void GuiApplication::glfwDropCallback(GLFWwindow* window, int count, const char** paths)

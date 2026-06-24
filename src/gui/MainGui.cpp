@@ -792,6 +792,13 @@ void MainGui::drawTabRender(AppState& state, ModelEntry& model, ILive2DBackend&,
         addRow("Hide Pure Red", [&]() {
             if (ToggleButton("##hidered", &state.view.hideRed)) app.pushUndoState("Toggle Hide Red");
         });
+        addRow("Stepped Interpolation", [&]() {
+            const char* interpModes[] = { "Off (Stepped)", "Linear", "Smoothstep" };
+            if (ImGui::Combo("##interpmode", &model.steppedInterpolationMode, interpModes, IM_ARRAYSIZE(interpModes)))
+            {
+                app.pushUndoState("Change Stepped Interpolation Mode");
+            }
+        });
 
         ImGui::EndTable();
     }

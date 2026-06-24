@@ -50,6 +50,7 @@ struct ModelEntry
     bool autoIdle = false;
     bool flipX = false;
     bool flipY = false;
+    int steppedInterpolationMode = 0; // 0=Off, 1=Linear, 2=Smoothstep
 
     std::vector<MotionItem> motions;
     std::vector<ExpressionItem> expressions;

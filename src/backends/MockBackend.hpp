@@ -24,6 +24,7 @@ public:
     void draw(const AppState& state, int width, int height, const ViewportCamera& camera) override;
     void prepareForExport(uint64_t modelId) override {}
     void drawForExport(const AppState& state, int width, int height, const ViewportCamera& camera, float absoluteTimeSeconds) override;
+    void setExporting(bool exporting) override {}
     void setHideRedOption(bool enable) override {}
     bool hitTest(uint64_t modelId, float x, float y) override { return false; }
     float getMotionTime(uint64_t modelId) override { return 0.0f; }

@@ -70,21 +70,38 @@ void LAppPal::ReleaseBytes(csmByte* byteData)
     delete[] byteData;
 }
 
+static int g_overrideCount = 0;
 static double g_overrideDeltaTime = -1.0;
 static double g_overrideCurrentTime = -1.0;
-static bool g_hasOverride = false;
+static bool g_isExporting = false;
 
 extern "C" {
 void LAppPal_SetOverrideTime(double currentTime, double deltaTime)
 {
     g_overrideCurrentTime = currentTime;
     g_overrideDeltaTime = deltaTime;
-    g_hasOverride = true;
+    g_overrideCount++;
 }
 
 void LAppPal_ClearOverrideTime()
 {
-    g_hasOverride = false;
+    g_overrideCount--;
+    if (g_overrideCount < 0) g_overrideCount = 0;
+}
+
+void LAppPal_SetExporting(bool exporting)
+{
+    g_isExporting = exporting;
+}
+
+bool LAppPal_IsOverridden()
+{
+    return g_overrideCount > 0;
+}
+
+bool LAppPal_IsExporting()
+{
+    return g_isExporting;
 }
 }
 
@@ -95,7 +112,7 @@ csmFloat32 LAppPal::GetDeltaTime()
 
 void LAppPal::UpdateTime()
 {
-    if (g_hasOverride)
+    if (g_overrideCount > 0 || g_isExporting)
     {
         s_currentFrame = g_overrideCurrentTime;
         s_deltaTime = g_overrideDeltaTime;
@@ -104,13 +121,21 @@ void LAppPal::UpdateTime()
     }
 
 #ifndef CSM_FIXED_FRAME_RATE
-    s_currentFrame = glfwGetTime();
+    double now = glfwGetTime();
+    double dt = now - s_lastFrame;
+    // 1ms 이내의 중복 호출 시에는 이전 프레임의 deltaTime 캐시 유지
+    if (dt > 0.001)
+    {
+        s_currentFrame = now;
+        s_deltaTime = dt;
+        s_lastFrame = now;
+    }
 #else
     s_frame += 1;
-    s_currentFrame = s_frame / CSM_FIXED_FRAME_RATE;
-#endif
+    s_currentFrame = static_cast<double>(s_frame) / CSM_FIXED_FRAME_RATE;
     s_deltaTime = s_currentFrame - s_lastFrame;
     s_lastFrame = s_currentFrame;
+#endif
 }
 
 void LAppPal::PrintLog(const csmChar* format, ...)
