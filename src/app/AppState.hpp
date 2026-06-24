@@ -58,6 +58,7 @@ struct ModelEntry
 
     std::vector<PlaylistItem> playlist;
     bool playlistActive = false;
+    float motionBlendDeltaThreshold = 0.15f;
 };
 
 struct ViewSettings

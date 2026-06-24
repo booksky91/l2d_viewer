@@ -31,6 +31,8 @@ public:
     void setMotionTime(uint64_t modelId, float timeSeconds) override {}
     void setMotionPaused(uint64_t modelId, bool paused) override {}
     bool isMotionPaused(uint64_t modelId) override { return false; }
+    float getMotionFadeInTime(uint64_t modelId, const std::string& group, int index) override { return -1.0f; }
+    void  setMotionBlendThreshold(uint64_t modelId, float threshold) override {}
 
     int getPartCount(uint64_t) override { return 0; }
     const char* getPartId(uint64_t, int) override { return ""; }

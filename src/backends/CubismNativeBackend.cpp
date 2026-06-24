@@ -149,6 +149,8 @@ public:
     void update(uint64_t, float, bool) override {}
     void draw(uint64_t, int, int, float, float, float, bool, bool) override {}
     void drawAtTime(uint64_t, int, int, float) override {}
+    float getMotionFadeInTime(uint64_t, const std::string&, int) override { return -1.0f; }
+    void  setMotionBlendThreshold(uint64_t, float) override {}
 };
 
 std::unique_ptr<INativeCubismBridge> createNativeCubismBridge()
@@ -291,6 +293,7 @@ void CubismNativeBackend::update(AppState& state, float dtSeconds)
     for (const auto& m : state.models)
     {
         _bridge->setTransform(m.id, m.x, m.y, m.scale, m.rotationDeg, m.alpha, m.flipX, m.flipY, m.loopMotion);
+        _bridge->setMotionBlendThreshold(m.id, m.motionBlendDeltaThreshold);
         _bridge->update(m.id, dtSeconds * m.timeScale, m.autoIdle);
     }
 }
@@ -370,6 +373,17 @@ bool CubismNativeBackend::isMotionPaused(uint64_t modelId)
 {
     if (!_bridge) return false;
     return _bridge->isMotionPaused(modelId);
+}
+
+float CubismNativeBackend::getMotionFadeInTime(uint64_t modelId, const std::string& group, int index)
+{
+    if (!_bridge) return -1.0f;
+    return _bridge->getMotionFadeInTime(modelId, group, index);
+}
+
+void CubismNativeBackend::setMotionBlendThreshold(uint64_t modelId, float threshold)
+{
+    if (_bridge) _bridge->setMotionBlendThreshold(modelId, threshold);
 }
 
 int CubismNativeBackend::getPartCount(uint64_t modelId)

@@ -169,8 +169,67 @@ private:
     bool _autoIdleEnabled;
 };
 
+class CubismQueueManagerAccessor : public Live2D::Cubism::Framework::CubismMotionQueueManager
+{
+public:
+    Live2D::Cubism::Framework::csmBool DoUpdateMotionPublic(Live2D::Cubism::Framework::CubismModel* model, Live2D::Cubism::Framework::csmFloat32 t)
+    {
+        return DoUpdateMotion(model, t);
+    }
+};
+
+static std::vector<float> sampleMotionFirstFrame(
+    LAppModelOverride* model, const std::string& group, int index)
+{
+    using namespace Live2D::Cubism::Framework;
+
+    auto* csmModel = model->GetModel();
+    int paramCount = csmModel->GetParameterCount();
+
+    // (1) 현재 파라미터 백업
+    std::vector<float> backup(paramCount);
+    for (int i = 0; i < paramCount; ++i)
+        backup[i] = csmModel->GetParameterValue(i);
+
+    std::vector<float> result(paramCount);
+
+    auto* motion = static_cast<CubismMotion*>(model->GetMotion(group, index));
+    if (motion)
+    {
+        // (2) CubismMotionQueueEntry를 t=0 기준으로 직접 구성
+        CubismMotionQueueEntry tempEntry;
+        tempEntry.SetStartTime(0.0f);
+        tempEntry.SetFadeInStartTime(0.0f);
+        tempEntry.SetEndTime(-1.0f);   // 종료 없음
+        tempEntry.IsStarted(true);
+        tempEntry.IsAvailable(true);
+
+        // (3) DoUpdateParameters 호출
+        motion->DoUpdateParameters(csmModel, 0.0f, 1.0f, &tempEntry);
+
+        // (4) 결과 읽기
+        for (int i = 0; i < paramCount; ++i)
+            result[i] = csmModel->GetParameterValue(i);
+    }
+    else
+    {
+        // 모션을 찾지 못하면 기본값 사용 (fallback)
+        for (int i = 0; i < paramCount; ++i)
+            result[i] = csmModel->GetParameterDefaultValue(
+                static_cast<csmUint32>(i));
+    }
+
+    // (5) 원래 파라미터 복원
+    for (int i = 0; i < paramCount; ++i)
+        csmModel->SetParameterValue(i, backup[i]);
+    csmModel->SaveParameters();
+
+    return result;
+}
+
 struct NativeModelRuntime
 {
+    uint64_t modelId = 0;
     std::unique_ptr<LAppModelOverride> model;
     float x = 0.0f;
     float y = 0.0f;
@@ -208,6 +267,18 @@ struct NativeModelRuntime
     bool playlistLoop = false;
     double playlistTotalDuration = 0.0;
     std::vector<double> playlistSlotStartTimes;
+
+    // ── 포즈 보간 상태 ───────────────────────────────
+    bool   poseBlending       = false;
+    float  poseBlendDuration  = 0.5f;   // 보간 시간 (초)
+    float  poseBlendElapsed   = 0.0f;
+    std::vector<float> poseBlendSrcParams;   // 전환 시점 A 포즈
+    std::vector<float> poseBlendDstParams;   // 모션 B t=0 포즈
+    float  motionBlendDeltaThreshold = 0.15f; // 보간 스킵 임계값
+
+    std::string pendingMotionGroup;
+    int         pendingMotionIndex = -1;
+    bool        pendingMotionLoop  = false;
 };
 
 static Live2D::Cubism::Framework::CubismFramework::Option makeCubismOption()
@@ -336,6 +407,7 @@ public:
         {
             LAppDelegate::GetInstance()->SetExternalContextSize(2048, 2048);
             auto rt = std::make_unique<NativeModelRuntime>();
+            rt->modelId = id;
             rt->model = std::make_unique<LAppModelOverride>();
 
             logDiagnostic("[NATIVE] load begin id=" + std::to_string(id) + " dir=" + modelDirUtf8 + " file=" + model3FileUtf8);
@@ -390,55 +462,112 @@ public:
         auto* rt = find(id);
         if (!rt || rt->nativeCrashed) return;
 
-        resetModelToDefaults(rt);
+        auto* csmModel = rt->model->GetModel();
+        if (!csmModel) return;
 
-        // Skip logging for Idle motions to reduce console log noise
-        if (group != "Idle" && group != "idle")
+        int paramCount = csmModel->GetParameterCount();
+
+        // (1) 현재 A 포즈 스냅샷
+        std::vector<float> srcParams(paramCount);
+        for (int i = 0; i < paramCount; ++i)
+            srcParams[i] = csmModel->GetParameterValue(i);
+
+        // (2) 모션 B t=0 포즈 산출
+        std::vector<float> dstParams = sampleMotionFirstFrame(rt->model.get(), group, index);
+
+        // (3) 보간 필요 여부 판단
+        bool skipBlend = !rt->hasLastCustomMotion; // 첫 모션 재생
+
+        if (!skipBlend)
         {
-            logDiagnostic("[NATIVE] start motion id=" + std::to_string(id) + " group=" + group + " index=" + std::to_string(index));
+            float maxDelta = 0.0f;
+            for (int i = 0; i < paramCount; ++i)
+                maxDelta = (std::max)(maxDelta, std::abs(srcParams[i] - dstParams[i]));
+            if (maxDelta < rt->motionBlendDeltaThreshold)
+                skipBlend = true;
         }
 
-        setCrashStage("native motion: LAppModel::StartMotion");
+        if (skipBlend)
+        {
+            // 보간 없이 바로 재생 (기존 방식)
+            resetModelToDefaults(rt);
+
+            if (group != "Idle" && group != "idle")
+            {
+                logDiagnostic("[NATIVE] start motion id=" + std::to_string(id) + " group=" + group + " index=" + std::to_string(index) + " (skip blend)");
+            }
+
+            setCrashStage("native motion: LAppModel::StartMotion");
 #if defined(_WIN32)
-        if (!safeStartMotion(rt->model.get(), group.c_str(), index, LAppDefine::PriorityForce))
-        {
-            rt->nativeCrashed = true;
-            rt->lastNativeError = lastSehMessage("LAppModel::StartMotion");
-            logDiagnostic(rt->lastNativeError);
-            return;
-        }
+            if (!safeStartMotion(rt->model.get(), group.c_str(), index, LAppDefine::PriorityForce))
+            {
+                rt->nativeCrashed = true;
+                rt->lastNativeError = lastSehMessage("LAppModel::StartMotion");
+                logDiagnostic(rt->lastNativeError);
+                return;
+            }
 #else
-        rt->model->StartMotion(group.c_str(), index, LAppDefine::PriorityForce);
+            rt->model->StartMotion(group.c_str(), index, LAppDefine::PriorityForce);
 #endif
 
-        auto* motionManager = rt->model->GetMotionManager();
-        if (motionManager)
-        {
-            auto* entries = motionManager->GetCubismMotionQueueEntries();
-            if (entries && entries->GetSize() > 0)
+            auto* motionManager = rt->model->GetMotionManager();
+            if (motionManager)
             {
-                auto* entry = entries->At(entries->GetSize() - 1);
-                if (entry)
+                auto* entries = motionManager->GetCubismMotionQueueEntries();
+                if (entries && entries->GetSize() > 0)
                 {
-                    auto* activeMotion = entry->GetCubismMotion();
-                    if (activeMotion)
+                    auto* entry = entries->At(entries->GetSize() - 1);
+                    if (entry)
                     {
-                        activeMotion->SetLoop(loop);
+                        auto* activeMotion = entry->GetCubismMotion();
+                        if (activeMotion)
+                        {
+                            activeMotion->SetLoop(loop);
+                        }
                     }
                 }
             }
+
+            // Track custom motion (ignore Idle or dummy motions)
+            if (group != "Idle" && group != "idle")
+            {
+                rt->hasLastCustomMotion = true;
+                rt->lastCustomMotionGroup = group;
+                rt->lastCustomMotionIndex = index;
+                rt->lastCustomMotionLoop = loop;
+                rt->lastCustomMotionTime = 0.0f;
+                rt->lastCustomMotionDuration = 0.0f; // Will be set in update
+            }
+            return;
         }
 
-        // Track custom motion (ignore Idle or dummy motions)
-        if (group != "Idle" && group != "idle")
+        // (4) 기존 모션 큐 정지 (보간 중 SDK가 파라미터 덮어쓰지 못하게)
+        auto* mqm = rt->model->GetMotionManager();
+        if (mqm) mqm->StopAllMotions();
+
+        // (5) 보간 상태 시작
+        rt->poseBlendSrcParams = std::move(srcParams);
+        rt->poseBlendDstParams = std::move(dstParams);
+        rt->poseBlending       = true;
+        rt->poseBlendElapsed   = 0.0f;
+        
+        // 보간 시간(poseBlendDuration) 설정. 모션 파일에 지정된 fadein time을 쿼리해서 덮어씀.
+        float fi = -1.0f;
+        auto* motion = rt->model->GetMotion(group, index);
+        if (motion)
         {
-            rt->hasLastCustomMotion = true;
-            rt->lastCustomMotionGroup = group;
-            rt->lastCustomMotionIndex = index;
-            rt->lastCustomMotionLoop = loop;
-            rt->lastCustomMotionTime = 0.0f;
-            rt->lastCustomMotionDuration = 0.0f; // Will be set in update
+            fi = motion->GetFadeInTime();
         }
+        rt->poseBlendDuration = (fi >= 0.0f) ? fi : 0.5f;
+
+        rt->pendingMotionGroup = group;
+        rt->pendingMotionIndex = index;
+        rt->pendingMotionLoop  = loop;
+
+        if (group != "Idle" && group != "idle")
+            logDiagnostic("[NATIVE] pose blend started: " + group
+                + "[" + std::to_string(index) + "] dur="
+                + std::to_string(rt->poseBlendDuration) + "s");
     }
 
     void resetModelToDefaults(NativeModelRuntime* rt)
@@ -469,6 +598,39 @@ public:
         }
     }
 
+    void playPlaylistSlotImmediate(NativeModelRuntime* rt, int index)
+    {
+        if (index < 0 || index >= (int)rt->playlistItems.size())
+        {
+            rt->playlistCurrentIndex = -1;
+            auto* mqm = rt->model->GetMotionManager();
+            if (mqm)
+            {
+                mqm->StopAllMotions();
+                mqm->SetReservePriority(LAppDefine::PriorityNone);
+                mqm->StartMotionPriority(rt->model->GetDummyMotion(), false, LAppDefine::PriorityNone);
+            }
+            return;
+        }
+
+        rt->playlistCurrentIndex = index;
+        const auto& item = rt->playlistItems[index];
+
+        auto* motion = rt->model->GetMotion(item.group, item.index);
+        if (motion)
+        {
+            motion->SetLoop(false);
+            motion->SetFadeInTime(0.0f);
+        }
+
+        setCrashStage("native playlist motion immediate: LAppModel::StartMotion");
+#if defined(_WIN32)
+        safeStartMotion(rt->model.get(), item.group.c_str(), item.index, LAppDefine::PriorityForce);
+#else
+        rt->model->StartMotion(item.group.c_str(), item.index, LAppDefine::PriorityForce);
+#endif
+    }
+
     void playPlaylistSlot(NativeModelRuntime* rt, int index)
     {
         if (index < 0 || index >= (int)rt->playlistItems.size())
@@ -487,8 +649,6 @@ public:
         rt->playlistCurrentIndex = index;
         const auto& item = rt->playlistItems[index];
 
-        // Set properties on the motion instance BEFORE starting it so that
-        // the newly created motion queue entry inherits these properties.
         auto* motion = rt->model->GetMotion(item.group, item.index);
         if (motion)
         {
@@ -496,26 +656,14 @@ public:
             motion->SetFadeInTime(item.fadeTime);
         }
 
-        setCrashStage("native playlist motion: LAppModel::StartMotion");
-#if defined(_WIN32)
-        if (!safeStartMotion(rt->model.get(), item.group.c_str(), item.index, LAppDefine::PriorityForce))
-        {
-            rt->nativeCrashed = true;
-            rt->lastNativeError = lastSehMessage("LAppModel::StartMotion (Playlist)");
-            logDiagnostic(rt->lastNativeError);
-            return;
-        }
-#else
-        rt->model->StartMotion(item.group.c_str(), item.index, LAppDefine::PriorityForce);
-#endif
+        // 보간 기능을 적용하여 모션을 시작합니다.
+        startMotion(rt->modelId, item.group, item.index, false);
     }
 
     void startPlaylist(uint64_t id, const std::vector<BridgePlaylistItem>& items, bool loop) override
     {
         auto* rt = find(id);
         if (!rt || rt->nativeCrashed || !rt->model) return;
-
-        resetModelToDefaults(rt);
 
         rt->isPlaylistActive = true;
         rt->playlistLoop = loop;
@@ -525,8 +673,9 @@ public:
         rt->playlistCurrentIndex = -1;
 
         double currentOffset = 0.0;
-        for (const auto& item : items)
+        for (size_t i = 0; i < items.size(); ++i)
         {
+            const auto& item = items[i];
             NativeModelRuntime::RuntimePlaylistItem rItem;
             rItem.group = item.group;
             rItem.index = item.index;
@@ -542,7 +691,15 @@ public:
             rItem.duration = duration;
 
             rt->playlistSlotStartTimes.push_back(currentOffset);
-            currentOffset += duration;
+
+            // 첫 모션 시작은 보간이 스킵되므로 제외하고, 두 번째 모션부터 보간 시간(item.fadeTime)을 가산합니다.
+            double slotDuration = duration;
+            if (i > 0)
+            {
+                slotDuration += item.fadeTime;
+            }
+            currentOffset += slotDuration;
+
             rt->playlistItems.push_back(rItem);
         }
         rt->playlistTotalDuration = currentOffset;
@@ -742,7 +899,12 @@ public:
                     for (int i = 0; i < (int)rt->playlistItems.size(); ++i)
                     {
                         double startTime = rt->playlistSlotStartTimes[i];
-                        double endTime = startTime + rt->playlistItems[i].duration;
+                        double slotDuration = rt->playlistItems[i].duration;
+                        if (i > 0)
+                        {
+                            slotDuration += rt->playlistItems[i].fadeTime;
+                        }
+                        double endTime = startTime + slotDuration;
                         if (curTime >= startTime && curTime < endTime)
                         {
                             targetSlot = i;
@@ -757,22 +919,6 @@ public:
                     if (targetSlot != -1 && targetSlot != rt->playlistCurrentIndex)
                     {
                         playPlaylistSlot(rt, targetSlot);
-                        auto* mqm = rt->model->GetMotionManager();
-                        if (mqm)
-                        {
-                            auto* entries = mqm->GetCubismMotionQueueEntries();
-                            if (entries && entries->GetSize() > 0)
-                            {
-                                auto* entry = entries->At(entries->GetSize() - 1);
-                                if (entry && entry->GetCubismMotion() != rt->model->GetDummyMotion())
-                                {
-                                    double slotExpectStart = rt->playlistSlotStartTimes[targetSlot];
-                                    double actualStartOffset = curTime - slotExpectStart;
-                                    entry->SetStartTime(rt->cumulativeTime - actualStartOffset);
-                                    entry->SetFadeInStartTime(rt->cumulativeTime - actualStartOffset);
-                                }
-                            }
-                        }
                     }
                 }
 
@@ -825,6 +971,112 @@ public:
                 rt->lastCustomMotionTime = rt->lastCustomMotionDuration;
             }
         }
+
+        // ── 포즈 보간 처리 ──────────────────────────────
+        if (rt->poseBlending)
+        {
+            rt->poseBlendElapsed += effectiveDt;
+            float t = (rt->poseBlendDuration > 0.0f)
+                      ? rt->poseBlendElapsed / rt->poseBlendDuration
+                      : 1.0f;
+
+            if (t >= 1.0f)
+            {
+                // 보간 완료 → 모션 B 시작
+                rt->poseBlending = false;
+
+                // 목표 포즈 확정
+                auto* csmModel = rt->model->GetModel();
+                if (csmModel)
+                {
+                    for (int i = 0; i < (int)rt->poseBlendDstParams.size(); ++i)
+                        csmModel->SetParameterValue(i, rt->poseBlendDstParams[i]);
+                    csmModel->SaveParameters();
+                }
+
+                // 모션 B 재생
+                setCrashStage("native motion (deferred): LAppModel::StartMotion");
+#if defined(_WIN32)
+                if (!safeStartMotion(rt->model.get(), rt->pendingMotionGroup.c_str(), rt->pendingMotionIndex, LAppDefine::PriorityForce))
+                {
+                    rt->nativeCrashed = true;
+                    rt->lastNativeError = lastSehMessage("LAppModel::StartMotion (deferred)");
+                    logDiagnostic(rt->lastNativeError);
+                    return;
+                }
+#else
+                rt->model->StartMotion(rt->pendingMotionGroup.c_str(), rt->pendingMotionIndex, LAppDefine::PriorityForce);
+#endif
+
+                // loop 플래그 설정 및 StartTime 보정
+                auto* mqm2 = rt->model->GetMotionManager();
+                if (mqm2)
+                {
+                    auto* entries = mqm2->GetCubismMotionQueueEntries();
+                    if (entries && entries->GetSize() > 0)
+                    {
+                        auto* entry = entries->At(entries->GetSize() - 1);
+                        if (entry && entry->GetCubismMotion())
+                        {
+                            entry->GetCubismMotion()->SetLoop(rt->pendingMotionLoop);
+
+                            // 플레이리스트인 경우 실제 시작 프레임 시간 오프셋 보정
+                            if (rt->isPlaylistActive && rt->playlistCurrentIndex != -1)
+                            {
+                                double slotExpectStart = rt->playlistSlotStartTimes[rt->playlistCurrentIndex];
+                                double expectMotionStart = slotExpectStart + rt->poseBlendDuration;
+                                double actualStartOffset = rt->cumulativeTime - expectMotionStart;
+                                entry->SetStartTime(rt->cumulativeTime - actualStartOffset);
+                                entry->SetFadeInStartTime(rt->cumulativeTime - actualStartOffset);
+                            }
+                        }
+                    }
+                }
+
+                // 트래킹 업데이트
+                if (rt->pendingMotionGroup != "Idle" && rt->pendingMotionGroup != "idle")
+                {
+                    rt->hasLastCustomMotion   = true;
+                    rt->lastCustomMotionGroup = rt->pendingMotionGroup;
+                    rt->lastCustomMotionIndex = rt->pendingMotionIndex;
+                    rt->lastCustomMotionLoop  = rt->pendingMotionLoop;
+                    rt->lastCustomMotionTime  = 0.0f;
+                }
+            }
+            else
+            {
+                // 보간 중: smoothstep으로 매 프레임 직접 설정
+                //   smooth_t = t²(3 - 2t)
+                float st = t * t * (3.0f - 2.0f * t);
+
+                auto* csmModel = rt->model->GetModel();
+                if (csmModel)
+                {
+                    int count = (int)(std::min)(rt->poseBlendSrcParams.size(),
+                                              rt->poseBlendDstParams.size());
+                    for (int i = 0; i < count; ++i)
+                    {
+                        float v = rt->poseBlendSrcParams[i]
+                                + (rt->poseBlendDstParams[i] - rt->poseBlendSrcParams[i]) * st;
+                        csmModel->SetParameterValue(i, v);
+                    }
+                    csmModel->SaveParameters();
+                }
+
+                // SDK Update 건너뜀 (파라미터 덮어쓰기 방지) -> 수정: 덮어쓰는 모션이 없으므로 Update를 수행해 렌더링 동기화
+                LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
+                LAppPal::UpdateTime();
+                setCrashStage("native update (blending): LAppModel::Update");
+#if defined(_WIN32)
+                safeUpdateModel(rt->model.get());
+#else
+                rt->model->Update();
+#endif
+                LAppPal_ClearOverrideTime();
+                return;
+            }
+        }
+        // ────────────────────────────────────────────────
 
         LAppPal_SetOverrideTime(rt->cumulativeTime, effectiveDt);
 
@@ -1059,6 +1311,9 @@ public:
         auto* rt = find(id);
         if (!rt || rt->nativeCrashed || !rt->model) return;
 
+        // 드래그 시 즉시 반응하도록 보간 상태 비활성화
+        rt->poseBlending = false;
+
         if (rt->isPlaylistActive)
         {
             if (rt->playlistItems.empty()) return;
@@ -1077,7 +1332,12 @@ public:
             for (int i = 0; i < (int)rt->playlistItems.size(); ++i)
             {
                 double startTime = rt->playlistSlotStartTimes[i];
-                double endTime = startTime + rt->playlistItems[i].duration;
+                double slotDuration = rt->playlistItems[i].duration;
+                if (i > 0)
+                {
+                    slotDuration += rt->playlistItems[i].fadeTime;
+                }
+                double endTime = startTime + slotDuration;
                 if (timeSeconds >= startTime && timeSeconds <= endTime)
                 {
                     targetSlot = i;
@@ -1092,7 +1352,8 @@ public:
             rt->cumulativeTime = timeSeconds;
             rt->lastCustomMotionTime = timeSeconds;
 
-            playPlaylistSlot(rt, targetSlot);
+            // 보간 없이 즉시 슬롯을 실행시킵니다.
+            playPlaylistSlotImmediate(rt, targetSlot);
 
             auto* mqm = rt->model->GetMotionManager();
             if (mqm)
@@ -1200,7 +1461,7 @@ public:
                         }
                     }
                 }
-                if (!found)
+                if (!found && !rt->poseBlending)
                 {
                     startMotion(id, rt->lastCustomMotionGroup, rt->lastCustomMotionIndex, rt->loopMotion);
                 }
@@ -1212,6 +1473,27 @@ public:
     {
         auto* rt = find(id);
         return rt ? rt->motionPaused : false;
+    }
+
+    float getMotionFadeInTime(uint64_t id, const std::string& group, int index) override
+    {
+        auto* rt = find(id);
+        if (!rt || rt->nativeCrashed || !rt->model) return -1.0f;
+        auto* motion = rt->model->GetMotion(group, index);
+        if (motion)
+        {
+            return motion->GetFadeInTime();
+        }
+        return -1.0f;
+    }
+
+    void setMotionBlendThreshold(uint64_t id, float threshold) override
+    {
+        auto* rt = find(id);
+        if (rt)
+        {
+            rt->motionBlendDeltaThreshold = threshold;
+        }
     }
 
     int getPartCount(uint64_t id) override

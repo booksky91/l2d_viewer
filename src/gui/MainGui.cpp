@@ -957,6 +957,7 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
     static ImVec2 marqueeStartPos;
     static bool isDraggingMarquee = false;
     static std::vector<bool> marqueeStartSelection;
+    static std::vector<PlaylistItem> g_playlistClipboard;
 
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
     {
@@ -969,6 +970,78 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
         return;
     }
 
+    // --- Clipboard Lambdas ---
+    auto copySelected = [&](int fallbackIdx) {
+        g_playlistClipboard.clear();
+        for (const auto& item : model.playlist)
+        {
+            if (item.selected)
+            {
+                g_playlistClipboard.push_back(item);
+            }
+        }
+        if (g_playlistClipboard.empty() && fallbackIdx >= 0 && fallbackIdx < (int)model.playlist.size())
+        {
+            g_playlistClipboard.push_back(model.playlist[fallbackIdx]);
+        }
+    };
+
+    auto cutSelected = [&](int fallbackIdx) {
+        copySelected(fallbackIdx);
+        if (g_playlistClipboard.empty()) return;
+
+        std::vector<int> toDelete;
+        if (fallbackIdx >= 0 && fallbackIdx < (int)model.playlist.size() && !model.playlist[fallbackIdx].selected)
+        {
+            toDelete.push_back(fallbackIdx);
+        }
+        else
+        {
+            for (int k = 0; k < (int)model.playlist.size(); ++k)
+            {
+                if (model.playlist[k].selected) toDelete.push_back(k);
+            }
+        }
+
+        std::sort(toDelete.rbegin(), toDelete.rend());
+        for (int idx : toDelete)
+        {
+            model.playlist.erase(model.playlist.begin() + idx);
+        }
+
+        if (model.playlist.empty())
+        {
+            model.playlistActive = false;
+            backend.stopPlaylist(model.id);
+        }
+        else
+        {
+            model.playlistActive = true;
+            backend.startPlaylist(model.id, model.playlist, model.loopMotion);
+        }
+        app.pushUndoState("Cut Playlist Items");
+    };
+
+    auto pasteAt = [&](int insertAt) {
+        if (g_playlistClipboard.empty()) return;
+        if (insertAt < 0) insertAt = 0;
+        if (insertAt > (int)model.playlist.size()) insertAt = (int)model.playlist.size();
+
+        std::vector<PlaylistItem> tempItems;
+        for (const auto& clipItem : g_playlistClipboard)
+        {
+            PlaylistItem newItem = clipItem;
+            newItem.selected = false; // Paste된 항목은 선택 해제된 상태로 삽입
+            tempItems.push_back(newItem);
+        }
+
+        model.playlist.insert(model.playlist.begin() + insertAt, tempItems.begin(), tempItems.end());
+        model.playlistActive = true;
+        backend.startPlaylist(model.id, model.playlist, model.loopMotion);
+        app.pushUndoState("Paste Playlist Items");
+    };
+    // -------------------------
+
     struct PlaylistItemRect {
         size_t index;
         ImVec2 min;
@@ -976,17 +1049,27 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
     };
     std::vector<PlaylistItemRect> itemRects;
 
-    if (ImGui::BeginTable("PlaylistTable", 3, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.5f)))
+    // 탭 전체 가용 크기 획득
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    // 하단에 고정할 "Motion Transition" 영역의 필요 높이 계산 (약 60px)
+    float fixedHeight = ImGui::GetFrameHeightWithSpacing() * 2.2f;
+    float scrollHeight = avail.y - fixedHeight - ImGui::GetStyle().ItemSpacing.y * 3.0f;
+    if (scrollHeight < 50.0f) scrollHeight = 50.0f; // 최소 높이 보장
+
+    // 스크롤 가능한 상단 리스트 영역
+    if (ImGui::BeginChild("##MotionPlaylistScroll", ImVec2(0, scrollHeight), false, ImGuiWindowFlags_NoScrollbar))
+    {
+        if (ImGui::BeginTable("PlaylistTable", 3, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, 0)))
     {
         ImGui::TableSetupColumn("Slot", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-        ImGui::TableSetupColumn("Fade-In (s)", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Interp (s)", ImGuiTableColumnFlags_WidthFixed, 90.0f);
         ImGui::TableSetupColumn("Motion Name", ImGuiTableColumnFlags_WidthStretch);
 
         ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
         ImGui::TableSetColumnIndex(0);
         ImGui::TableHeader("Slot");
         ImGui::TableSetColumnIndex(1);
-        ImGui::TableHeader("Fade-In (s)");
+        ImGui::TableHeader("Interp (s)");
         ImGui::TableSetColumnIndex(2);
         ImGui::TableHeader("Motion Name");
 
@@ -1136,7 +1219,20 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
 
             if (ImGui::BeginPopupContextItem(nullptr, ImGuiPopupFlags_MouseButtonRight))
             {
-                if (ImGui::MenuItem("Delete"))
+                if (ImGui::MenuItem("Copy", "Ctrl+C"))
+                {
+                    copySelected(i);
+                }
+                if (ImGui::MenuItem("Cut", "Ctrl+X"))
+                {
+                    cutSelected(i);
+                }
+                if (ImGui::MenuItem("Paste", "Ctrl+V", false, !g_playlistClipboard.empty()))
+                {
+                    pasteAt(i);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Delete", "Delete"))
                 {
                     std::vector<int> toDelete;
                     if (item.selected)
@@ -1214,9 +1310,19 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
                     {
                         item.group = mot.group;
                         item.index = mot.index;
+                        float fi = backend.getMotionFadeInTime(model.id, mot.group, mot.index);
+                        item.fadeTime = (fi >= 0.0f) ? fi : 0.5f;
                         model.playlistActive = true;
                         backend.startPlaylist(model.id, model.playlist, model.loopMotion);
                         app.pushUndoState("Select Playlist Motion");
+                    }
+                    if (isSel)
+                    {
+                        ImGui::SetItemDefaultFocus();
+                        if (ImGui::IsWindowAppearing())
+                        {
+                            ImGui::SetScrollHereY(0.5f);
+                        }
                     }
                 }
                 ImGui::EndCombo();
@@ -1271,6 +1377,8 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
 
         ImGui::EndTable();
     }
+    ImGui::EndChild();
+}
 
     // Context menu trigger on empty area
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::IsAnyItemHovered())
@@ -1285,13 +1393,39 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
             PlaylistItem newItem;
             if (!model.motions.empty())
             {
-                newItem.group = model.motions[0].group;
-                newItem.index = model.motions[0].index;
+                int nextIdx = 0;
+                if (!model.playlist.empty())
+                {
+                    const auto& lastItem = model.playlist.back();
+                    int lastMotionIdx = -1;
+                    for (int m_idx = 0; m_idx < (int)model.motions.size(); ++m_idx)
+                    {
+                        if (model.motions[m_idx].group == lastItem.group && model.motions[m_idx].index == lastItem.index)
+                        {
+                            lastMotionIdx = m_idx;
+                            break;
+                        }
+                    }
+                    if (lastMotionIdx != -1)
+                    {
+                        nextIdx = (lastMotionIdx + 1) % (int)model.motions.size();
+                    }
+                }
+                const auto& nextMot = model.motions[nextIdx];
+                newItem.group = nextMot.group;
+                newItem.index = nextMot.index;
+                float fi = backend.getMotionFadeInTime(model.id, nextMot.group, nextMot.index);
+                newItem.fadeTime = (fi >= 0.0f) ? fi : 0.5f;
             }
             model.playlist.push_back(newItem);
             model.playlistActive = true;
             backend.startPlaylist(model.id, model.playlist, model.loopMotion);
             app.pushUndoState("Add Playlist Item");
+        }
+
+        if (ImGui::MenuItem("Paste", "Ctrl+V", false, !g_playlistClipboard.empty()))
+        {
+            pasteAt((int)model.playlist.size());
         }
 
         if (ImGui::MenuItem("Clear"))
@@ -1304,52 +1438,79 @@ void MainGui::drawTabMotion(ModelEntry& model, ILive2DBackend& backend, GuiAppli
         ImGui::EndPopup();
     }
 
-    // Keyboard delete key handling
-    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Delete) && _lastFocusedTable == FOCUS_PLAYLIST)
+    // Keyboard and Shortcut handling
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !ImGui::GetIO().WantTextInput && _lastFocusedTable == FOCUS_PLAYLIST)
     {
-        std::vector<int> toDelete;
-        for (int k = 0; k < (int)model.playlist.size(); ++k)
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
         {
-            if (model.playlist[k].selected) toDelete.push_back(k);
+            copySelected(-1);
         }
-        std::sort(toDelete.rbegin(), toDelete.rend());
-        for (int idx : toDelete)
+        else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
         {
-            model.playlist.erase(model.playlist.begin() + idx);
+            cutSelected(-1);
         }
-        if (model.playlist.empty())
+        else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
         {
-            model.playlistActive = false;
-            backend.stopPlaylist(model.id);
+            int insertAt = (int)model.playlist.size();
+            for (int k = 0; k < (int)model.playlist.size(); ++k)
+            {
+                if (model.playlist[k].selected)
+                {
+                    insertAt = k;
+                    break;
+                }
+            }
+            pasteAt(insertAt);
         }
-        else
+        else if (ImGui::IsKeyPressed(ImGuiKey_Delete))
         {
-            model.playlistActive = true;
-            backend.startPlaylist(model.id, model.playlist, model.loopMotion);
-        }
-        app.pushUndoState("Delete Selected Playlist Items");
-    }
-
-    // Play Active Playlist Button
-    ImGui::Spacing();
-    if (model.playlistActive)
-    {
-        if (ImGui::Button("Stop Sequence", ImVec2(-FLT_MIN, 0)))
-        {
-            model.playlistActive = false;
-            backend.stopPlaylist(model.id);
-        }
-    }
-    else
-    {
-        if (ImGui::Button("Play Sequence", ImVec2(-FLT_MIN, 0)))
-        {
-            if (!model.playlist.empty())
+            std::vector<int> toDelete;
+            for (int k = 0; k < (int)model.playlist.size(); ++k)
+            {
+                if (model.playlist[k].selected) toDelete.push_back(k);
+            }
+            std::sort(toDelete.rbegin(), toDelete.rend());
+            for (int idx : toDelete)
+            {
+                model.playlist.erase(model.playlist.begin() + idx);
+            }
+            if (model.playlist.empty())
+            {
+                model.playlistActive = false;
+                backend.stopPlaylist(model.id);
+            }
+            else
             {
                 model.playlistActive = true;
                 backend.startPlaylist(model.id, model.playlist, model.loopMotion);
             }
+            app.pushUndoState("Delete Selected Playlist Items");
         }
+    }
+
+    // 하단 고정 영역
+    if (ImGui::BeginChild("##MotionTransitionFixed", ImVec2(0, fixedHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+    {
+        // Play Sequence / Stop Sequence 버튼 제거 후, 대신:
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::TextDisabled("Motion Transition");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##blendDelta", &model.motionBlendDeltaThreshold,
+                                0.0f, 1.0f, "Skip threshold: %.2f"))
+        {
+            // 실시간으로 bridge에 동기화 (백엔드 호출)
+            backend.setMotionBlendThreshold(model.id, model.motionBlendDeltaThreshold);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "포즈 차이가 이 값보다 작으면 보간을 건너뜁니다.\n"
+                "0 = 항상 보간 / 1 = 거의 항상 스킵");
+        ImGui::EndChild();
     }
 }
 

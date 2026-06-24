@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shobjidl.h>
+#include <vector>
 
 namespace l2dgui
 {
@@ -62,11 +63,19 @@ std::optional<std::filesystem::path> pickFile(const wchar_t* filter)
     {
         if (filter != nullptr)
         {
-            COMDLG_FILTERSPEC fileTypes[] = {
-                { L"Live2D Model (*.model3.json)", L"*.model3.json" },
-                { L"All Files (*.*)", L"*.*" }
-            };
-            pFileOpen->SetFileTypes(2, fileTypes);
+            std::vector<COMDLG_FILTERSPEC> fileTypes;
+            const wchar_t* p = filter;
+            while (*p != L'\0')
+            {
+                const wchar_t* name = p;
+                p += wcslen(p) + 1;
+                if (*p == L'\0') break; // Malformed or end of filter
+                const wchar_t* spec = p;
+                p += wcslen(p) + 1;
+                fileTypes.push_back({ name, spec });
+            }
+            fileTypes.push_back({ L"All Files (*.*)", L"*.*" });
+            pFileOpen->SetFileTypes(static_cast<UINT>(fileTypes.size()), fileTypes.data());
         }
 
         if (SUCCEEDED(pFileOpen->Show(NULL)))
@@ -110,7 +119,7 @@ std::optional<std::filesystem::path> saveFile(const wchar_t* defaultName, const 
     if (SUCCEEDED(hr))
     {
         COMDLG_FILTERSPEC fileTypes[] = {
-            { L"Live2D Project (*.l2dproj)", L"*.l2dproj" },
+            { L"Live2D Project (*.json)", L"*.json" },
             { L"All Files (*.*)", L"*.*" }
         };
         pFileSave->SetFileTypes(2, fileTypes);

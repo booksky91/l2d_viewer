@@ -1209,12 +1209,10 @@ void GuiApplication::loadConfig()
 
 void GuiApplication::saveProject()
 {
-    if (_currentProjectPath.empty() || ImGui::GetIO().KeyShift)
-    {
-        auto path = NativeDialogs::saveFile(L"project", L"l2dproj");
-        if (!path) return;
-        _currentProjectPath = *path;
-    }
+    auto path = NativeDialogs::saveFile(L"project", L"json");
+    if (!path) return;
+    _currentProjectPath = *path;
+
     if (ProjectSerializer::save(_state, _currentProjectPath))
     {
         ConsoleLog::getInstance().addLog(LOG_INFO, "[Project] Saved: " + utf8Path(_currentProjectPath));
@@ -1227,7 +1225,7 @@ void GuiApplication::saveProject()
 
 void GuiApplication::loadProject()
 {
-    auto path = NativeDialogs::pickFile(L"Live2D Project (*.l2dproj)\0*.l2dproj\0");
+    auto path = NativeDialogs::pickFile(L"Live2D Project (*.json)\0*.json\0");
     if (!path) return;
 
     std::string error;

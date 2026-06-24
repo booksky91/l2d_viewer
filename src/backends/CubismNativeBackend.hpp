@@ -41,6 +41,8 @@ public:
     virtual void setMotionTime(uint64_t id, float timeSeconds) = 0;
     virtual void setMotionPaused(uint64_t id, bool paused) = 0;
     virtual bool isMotionPaused(uint64_t id) = 0;
+    virtual float getMotionFadeInTime(uint64_t id, const std::string& group, int index) = 0;
+    virtual void  setMotionBlendThreshold(uint64_t id, float threshold) = 0;
 
     virtual int getPartCount(uint64_t id) = 0;
     virtual const char* getPartId(uint64_t id, int index) = 0;
@@ -86,6 +88,8 @@ public:
     void setMotionTime(uint64_t modelId, float timeSeconds) override;
     void setMotionPaused(uint64_t modelId, bool paused) override;
     bool isMotionPaused(uint64_t modelId) override;
+    float getMotionFadeInTime(uint64_t modelId, const std::string& group, int index) override;
+    void  setMotionBlendThreshold(uint64_t modelId, float threshold) override;
 
     int getPartCount(uint64_t modelId) override;
     const char* getPartId(uint64_t modelId, int index) override;
